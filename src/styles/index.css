@@ -1,0 +1,24 @@
+@import './fonts.css';
+@import './tailwind.css';
+@import './theme.css';
+@keyframes enemyPath1 {
+  0% {
+    transform: translate(0, 0);
+  }
+
+  20% {
+    transform: translate(230px, 35px);
+  }
+
+  45% {
+    transform: translate(430px, 140px);
+  }
+
+  70% {
+    transform: translate(650px, 40px);
+  }
+
+  100% {
+    transform: translate(900px, 120px);
+  }
+}
