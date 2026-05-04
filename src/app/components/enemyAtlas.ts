@@ -1,4 +1,13 @@
 export const ENEMY_ANIMATIONS = {
+  attackSide: [
+    { name: 'SaurianElite_attack_0001.png', textureRect: [0, 0, 78, 104], rotated: false, colorRect: [0, 0, 78, 104], sourceSize: [104, 104] },
+    { name: 'SaurianElite_attack_0002.png', textureRect: [78, 0, 76, 92], rotated: false, colorRect: [14, 6, 76, 92], sourceSize: [104, 104] },
+    { name: 'SaurianElite_attack_0003.png', textureRect: [154, 0, 74, 104], rotated: false, colorRect: [0, 0, 74, 104], sourceSize: [104, 104] },
+    { name: 'SaurianElite_attack_0004.png', textureRect: [0, 104, 92, 104], rotated: false, colorRect: [0, 0, 92, 104], sourceSize: [104, 104] },
+    { name: 'SaurianElite_attack_0005.png', textureRect: [156, 104, 78, 104], rotated: false, colorRect: [0, 0, 78, 104], sourceSize: [104, 104] },
+    { name: 'SaurianElite_attack_0006.png', textureRect: [230, 104, 88, 104], rotated: false, colorRect: [0, 0, 88, 104], sourceSize: [104, 104] },
+  ],
+
   walkSide: [
     { name: 'SaurianElite_0001.png', textureRect: [238, 276, 66, 88], rotated: true, colorRect: [19, 25, 88, 66], sourceSize: [148, 104] },
     { name: 'SaurianElite_0003.png', textureRect: [360, 0, 70, 82], rotated: true, colorRect: [23, 21, 82, 70], sourceSize: [148, 104] },

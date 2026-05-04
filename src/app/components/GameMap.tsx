@@ -1,406 +1,148 @@
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
+
+import { GameBoard } from './game/GameBoard';
+import { GameHud } from './game/GameHud';
+import { GameMapStyles } from './game/GameMapStyles';
+import { TowerShopPanel } from './game/TowerShopPanel';
 import {
-  GRID_COLS,
-  GRID_ROWS,
-  getTerrainAtGrid,
+  createInitialGameState,
+  getBlockerRepairCost,
+  getBlockerUpgradeCost,
+  getTowerUpgradeCost,
+  MAX_BLOCKER_LEVEL,
+  MAX_TOWER_LEVEL,
+  ROAD_BLOCKER_ITEM,
+  TOWER_SHOP,
+} from '../game/constants';
+import {
   getTerrainAtPercent,
   getTerrainMessage,
   gridToPercent,
   isTowerPlaceableAtPercent,
+  percentToGrid,
 } from '../game/mapGrid';
-
-import { EnemySprite } from './EnemySprite';
-import { TowerSprite } from './TowerSprite';
-import { useEffect, useRef, useState, type MouseEvent } from 'react';
-import { ArrowLeft, Pause, Play, Heart, Coins, Shield } from 'lucide-react';
-import mapImage from '../../imports/MainScreen_DT.png?url';
+import { distance } from '../game/math';
+import { ENEMY_PATH, getBlockerFootprintCells } from '../game/path';
+import { updateGame } from '../game/updateGame';
+import type {
+  BuildItemType,
+  BuildShopItem,
+  EnemyType,
+  GameEnemy,
+  GameSettings,
+  GameState,
+  LevelConfig,
+  PlacedBlocker,
+  PlacedTower,
+  PlayerUpgrades,
+} from '../game/types';
 
 interface GameMapProps {
+  level: LevelConfig;
+  settings: GameSettings;
+  upgrades: PlayerUpgrades;
   onBack: () => void;
+  onLevelComplete: (result: { levelId: LevelConfig['id']; score: number; stars: number }) => void;
 }
 
-type TowerType = 'crossbow' | 'magic' | 'necromancer';
+type SelectedEntity =
+  | { kind: 'tower'; id: number }
+  | { kind: 'blocker'; id: number };
 
-interface Point {
-  x: number;
-  y: number;
-}
-
-interface GridNode {
-  row: number;
-  col: number;
-}
-
-interface GameEnemy {
-  id: number;
-  x: number;
-  y: number;
-  hp: number;
-  maxHp: number;
-  speed: number;
-  pathIndex: number;
-  spawnDelay: number;
-  size: number;
-  reward: number;
-}
-
-interface PlacedTower {
-  id: number;
-  type: TowerType;
-  x: number;
-  y: number;
-  size: number;
-  range: number;
-  damage: number;
-  fireRate: number;
-  lastShotTime: number;
-}
-
-interface TowerShopItem {
-  type: TowerType;
-  name: string;
-  cost: number;
-  icon: string;
-  size: number;
-  range: number;
-  damage: number;
-  fireRate: number;
-}
-
-interface ProjectileEffect {
-  id: number;
-  fromX: number;
-  fromY: number;
-  toX: number;
-  toY: number;
-  type: TowerType;
-  createdAt: number;
-}
-
-interface GameState {
-  health: number;
-  coins: number;
-  wave: number;
-  enemies: GameEnemy[];
-  placedTowers: PlacedTower[];
-  projectiles: ProjectileEffect[];
-}
-
-const PROJECTILE_LIFETIME = 360;
-
-const TOWER_SHOP: TowerShopItem[] = [
+const ENEMY_TEMPLATES: Record<
+  EnemyType,
   {
-    type: 'crossbow',
-    name: 'Tháp Cung',
-    cost: 50,
-    icon: '🏹',
-    size: 82,
-    range: 18,
-    damage: 18,
-    fireRate: 1.8,
-  },
-  {
-    type: 'magic',
-    name: 'Tháp Phép',
-    cost: 150,
-    icon: '✨',
-    size: 88,
-    range: 20,
-    damage: 32,
-    fireRate: 1.1,
-  },
-  {
-    type: 'necromancer',
-    name: 'Tháp Bóng Tối',
-    cost: 100,
-    icon: '💀',
-    size: 92,
-    range: 17,
-    damage: 24,
-    fireRate: 1.3,
-  },
-];
+    hp: number;
+    speed: number;
+    reward: number;
+    size: number;
+    damage: number;
+  }
+> = {
+  grunt: { hp: 1, speed: 1, reward: 1, size: 42, damage: 1 },
+  runner: { hp: 0.68, speed: 1.45, reward: 1.15, size: 38, damage: 0.85 },
+  brute: { hp: 2.15, speed: 0.72, reward: 2.25, size: 52, damage: 1.55 },
+  boss: { hp: 7.2, speed: 0.52, reward: 8, size: 68, damage: 2.5 },
+};
 
-function createInitialGameState(): GameState {
-  return {
-    health: 20,
-    coins: 300,
-    wave: 1,
-    enemies: [],
-    placedTowers: [],
-    projectiles: [],
-  };
-}
+function buildWaveLineup(wave: number, maxWaves: number): EnemyType[] {
+  const lineup: EnemyType[] = Array.from({ length: 5 + wave }, () => 'grunt');
 
-function distance(a: Point, b: Point) {
-  const dx = a.x - b.x;
-  const dy = a.y - b.y;
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-function isRoadCell(row: number, col: number) {
-  if (row < 0 || row >= GRID_ROWS) return false;
-  if (col < 0 || col >= GRID_COLS) return false;
-
-  return getTerrainAtGrid(row, col) === 'R';
-}
-
-function nodeKey(node: GridNode) {
-  return `${node.row},${node.col}`;
-}
-
-function heuristic(a: GridNode, b: GridNode) {
-  const dx = Math.abs(a.col - b.col);
-  const dy = Math.abs(a.row - b.row);
-
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-function findRoadCellFromLeft(preferredRow: number): GridNode {
-  for (let col = 0; col < GRID_COLS; col++) {
-    const rows = Array.from({ length: GRID_ROWS }, (_, row) => row).sort(
-      (a, b) => Math.abs(a - preferredRow) - Math.abs(b - preferredRow)
-    );
-
-    for (const row of rows) {
-      if (isRoadCell(row, col)) {
-        return { row, col };
-      }
+  if (wave >= 2) {
+    for (let i = 0; i < Math.ceil(wave / 2); i++) {
+      lineup.splice(Math.min(lineup.length, i * 3 + 2), 0, 'runner');
     }
   }
 
-  throw new Error('Không tìm thấy ô R ở phía trái map.');
-}
-
-function findRoadCellFromRight(preferredRow: number): GridNode {
-  for (let col = GRID_COLS - 1; col >= 0; col--) {
-    const rows = Array.from({ length: GRID_ROWS }, (_, row) => row).sort(
-      (a, b) => Math.abs(a - preferredRow) - Math.abs(b - preferredRow)
-    );
-
-    for (const row of rows) {
-      if (isRoadCell(row, col)) {
-        return { row, col };
-      }
+  if (wave >= 3) {
+    for (let i = 0; i < Math.floor(wave / 3); i++) {
+      lineup.splice(Math.min(lineup.length, i * 5 + 4), 0, 'brute');
     }
   }
 
-  throw new Error('Không tìm thấy ô R ở phía phải map.');
-}
-
-function reconstructPath(
-  cameFrom: Map<string, GridNode | null>,
-  current: GridNode
-) {
-  const path: GridNode[] = [current];
-
-  let cursor = cameFrom.get(nodeKey(current)) ?? null;
-
-  while (cursor) {
-    path.push(cursor);
-    cursor = cameFrom.get(nodeKey(cursor)) ?? null;
+  if (wave % 5 === 0 || wave === maxWaves) {
+    lineup.push('boss');
   }
 
-  return path.reverse();
+  return lineup;
 }
 
-function findAStarPathOnRoad(): GridNode[] {
-  const preferredStartRow = Math.floor(GRID_ROWS * 0.38);
-  const preferredGoalRow = Math.floor(GRID_ROWS * 0.42);
+function createEnemyWave(wave: number, level: LevelConfig): GameEnemy[] {
+  const baseHp = (88 + wave * 21) * level.difficultyMultiplier;
+  const baseSpeed = (7.4 + wave * 0.34) * Math.min(1.16, level.difficultyMultiplier);
+  const baseReward = 12 + wave * 2;
+  const baseDamage = 24 + wave * 2;
+  const lineup = buildWaveLineup(wave, level.maxWaves);
+  const seed = Date.now();
 
-  const start = findRoadCellFromLeft(preferredStartRow);
-  const goal = findRoadCellFromRight(preferredGoalRow);
+  return lineup.map((enemyType, index) => {
+    const template = ENEMY_TEMPLATES[enemyType];
+    const hp = Math.round(baseHp * template.hp);
 
-  const openSet: GridNode[] = [start];
-
-  const cameFrom = new Map<string, GridNode | null>();
-  const gScore = new Map<string, number>();
-  const fScore = new Map<string, number>();
-
-  cameFrom.set(nodeKey(start), null);
-  gScore.set(nodeKey(start), 0);
-  fScore.set(nodeKey(start), heuristic(start, goal));
-
-  const directions = [
-    { row: -1, col: 0, cost: 1 },
-    { row: 1, col: 0, cost: 1 },
-    { row: 0, col: -1, cost: 1 },
-    { row: 0, col: 1, cost: 1 },
-    { row: -1, col: -1, cost: Math.SQRT2 },
-    { row: -1, col: 1, cost: Math.SQRT2 },
-    { row: 1, col: -1, cost: Math.SQRT2 },
-    { row: 1, col: 1, cost: Math.SQRT2 },
-  ];
-
-  while (openSet.length > 0) {
-    openSet.sort((a, b) => {
-      return (fScore.get(nodeKey(a)) ?? Infinity) - (fScore.get(nodeKey(b)) ?? Infinity);
-    });
-
-    const current = openSet.shift()!;
-
-    if (current.row === goal.row && current.col === goal.col) {
-      return reconstructPath(cameFrom, current);
-    }
-
-    for (const direction of directions) {
-      const neighbor = {
-        row: current.row + direction.row,
-        col: current.col + direction.col,
-      };
-
-      if (!isRoadCell(neighbor.row, neighbor.col)) continue;
-
-      const currentKey = nodeKey(current);
-      const neighborKey = nodeKey(neighbor);
-
-      const tentativeGScore = (gScore.get(currentKey) ?? Infinity) + direction.cost;
-
-      if (tentativeGScore < (gScore.get(neighborKey) ?? Infinity)) {
-        cameFrom.set(neighborKey, current);
-        gScore.set(neighborKey, tentativeGScore);
-        fScore.set(neighborKey, tentativeGScore + heuristic(neighbor, goal));
-
-        const alreadyOpen = openSet.some(
-          (node) => node.row === neighbor.row && node.col === neighbor.col
-        );
-
-        if (!alreadyOpen) {
-          openSet.push(neighbor);
-        }
-      }
-    }
-  }
-
-  throw new Error('A* không tìm được đường đi liên tục qua các ô R.');
-}
-
-function isSegmentOnRoad(start: GridNode, end: GridNode) {
-  const steps = Math.max(
-    Math.abs(end.row - start.row),
-    Math.abs(end.col - start.col),
-    1
-  ) * 3;
-
-  for (let i = 0; i <= steps; i++) {
-    const t = i / steps;
-
-    const row = Math.round(start.row + (end.row - start.row) * t);
-    const col = Math.round(start.col + (end.col - start.col) * t);
-
-    if (!isRoadCell(row, col)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function smoothRoadPath(path: GridNode[]) {
-  if (path.length <= 2) return path;
-
-  const result: GridNode[] = [];
-  let currentIndex = 0;
-
-  result.push(path[currentIndex]);
-
-  while (currentIndex < path.length - 1) {
-    let nextIndex = path.length - 1;
-
-    while (
-      nextIndex > currentIndex + 1 &&
-      !isSegmentOnRoad(path[currentIndex], path[nextIndex])
-    ) {
-      nextIndex--;
-    }
-
-    result.push(path[nextIndex]);
-    currentIndex = nextIndex;
-  }
-
-  return result;
-}
-
-function createEnemyPathFromAStar(): Point[] {
-  const rawPath = findAStarPathOnRoad();
-  const smoothPath = smoothRoadPath(rawPath);
-  
-  return smoothPath.map((node) => gridToPercent(node.row, node.col));
-}
-
-const ENEMY_PATH: Point[] = createEnemyPathFromAStar();
-
-function moveEnemy(enemy: GameEnemy, deltaSeconds: number): GameEnemy | null {
-  if (enemy.spawnDelay > 0) {
     return {
-      ...enemy,
-      spawnDelay: Math.max(0, enemy.spawnDelay - deltaSeconds * 1000),
+      id: seed + index,
+      enemyType,
+      x: ENEMY_PATH[0].x,
+      y: ENEMY_PATH[0].y,
+      hp,
+      maxHp: hp,
+      speed: Number((baseSpeed * template.speed).toFixed(2)),
+      path: ENEMY_PATH,
+      pathIndex: 0,
+      spawnDelay: index * 610,
+      size: template.size,
+      reward: Math.round(baseReward * template.reward),
+      attackDamage: Math.round(baseDamage * template.damage),
+      attackRange: 1,
+      attackingBlockerId: null,
+      attackingGoal: false,
+      goalAttackCooldown: 0,
     };
-  }
-
-  let nextEnemy = { ...enemy };
-  let remainingStep = enemy.speed * deltaSeconds;
-
-  while (remainingStep > 0) {
-    const target = ENEMY_PATH[nextEnemy.pathIndex + 1];
-
-    if (!target) {
-      return null;
-    }
-
-    const dx = target.x - nextEnemy.x;
-    const dy = target.y - nextEnemy.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-
-    if (dist < 0.05) {
-      nextEnemy = {
-        ...nextEnemy,
-        x: target.x,
-        y: target.y,
-        pathIndex: nextEnemy.pathIndex + 1,
-      };
-
-      continue;
-    }
-
-    if (remainingStep >= dist) {
-      nextEnemy = {
-        ...nextEnemy,
-        x: target.x,
-        y: target.y,
-        pathIndex: nextEnemy.pathIndex + 1,
-      };
-
-      remainingStep -= dist;
-    } else {
-      nextEnemy = {
-        ...nextEnemy,
-        x: nextEnemy.x + (dx / dist) * remainingStep,
-        y: nextEnemy.y + (dy / dist) * remainingStep,
-      };
-
-      remainingStep = 0;
-    }
-  }
-
-  return nextEnemy;
+  });
 }
 
-function getProjectileColor(type: TowerType) {
-  if (type === 'crossbow') return '#facc15';
-  if (type === 'magic') return '#38bdf8';
-  return '#a855f7';
-}
-
-export function GameMap({ onBack }: GameMapProps) {
-  const [game, setGame] = useState<GameState>(() => createInitialGameState());
+export function GameMap({ level, settings, upgrades, onBack, onLevelComplete }: GameMapProps) {
+  const [game, setGame] = useState<GameState>(() => createInitialGameState(level, upgrades));
   const [isPaused, setIsPaused] = useState(false);
-  const [selectedTowerType, setSelectedTowerType] = useState<TowerType | null>(null);
+  const [selectedBuildType, setSelectedBuildType] = useState<BuildItemType | null>(null);
+  const [selectedEntity, setSelectedEntity] = useState<SelectedEntity | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const lastTimeRef = useRef<number | null>(null);
+  const simulatedTimeRef = useRef(0);
   const noticeTimeoutRef = useRef<number | null>(null);
-
-  const selectedTower = TOWER_SHOP.find((tower) => tower.type === selectedTowerType);
+  const reportedLevelCompleteRef = useRef(false);
+  const selectedShopTower = TOWER_SHOP.find((tower) => tower.type === selectedBuildType);
+  const selectedBuildItem =
+    selectedShopTower ?? (selectedBuildType === ROAD_BLOCKER_ITEM.type ? ROAD_BLOCKER_ITEM : undefined);
+  const selectedTower =
+    selectedEntity?.kind === 'tower'
+      ? game.placedTowers.find((tower) => tower.id === selectedEntity.id)
+      : undefined;
+  const selectedBlocker =
+    selectedEntity?.kind === 'blocker'
+      ? game.placedBlockers.find((blocker) => blocker.id === selectedEntity.id)
+      : undefined;
 
   const showNotice = (message: string) => {
     setNotice(message);
@@ -421,8 +163,13 @@ export function GameMap({ onBack }: GameMapProps) {
         return prev;
       }
 
-      if (prev.health <= 0) {
-        showNotice('Game over rồi!');
+      if (prev.status !== 'playing') {
+        showNotice('Màn này đã kết thúc.');
+        return prev;
+      }
+
+      if (prev.wave > prev.maxWaves) {
+        showNotice('Không còn wave để bắt đầu.');
         return prev;
       }
 
@@ -431,55 +178,110 @@ export function GameMap({ onBack }: GameMapProps) {
         return prev;
       }
 
-      const enemyHp = 100 + prev.wave * 18;
-      const enemySpeed = 7.5 + prev.wave * 0.45;
-      const enemyReward = 14 + prev.wave * 2;
-
-      const newEnemies: GameEnemy[] = Array.from({ length: 6 + prev.wave }, (_, index) => ({
-        id: Date.now() + index,
-        x: ENEMY_PATH[0].x,
-        y: ENEMY_PATH[0].y,
-        hp: enemyHp,
-        maxHp: enemyHp,
-        speed: enemySpeed,
-        pathIndex: 0,
-        spawnDelay: index * 650,
-        size: 100,
-        reward: enemyReward,
-      }));
-
       return {
         ...prev,
-        enemies: newEnemies,
+        enemies: createEnemyWave(prev.wave, level),
         wave: prev.wave + 1,
       };
     });
   };
 
-  const placeTower = (event: MouseEvent<HTMLDivElement>) => {
-    if (!selectedTower) return;
-
-    if (game.health <= 0) {
-      showNotice('Game over rồi, không thể đặt tháp!');
+  const placeBuildItem = (event: MouseEvent<HTMLDivElement>) => {
+    if (!selectedBuildItem) {
+      setSelectedEntity(null);
       return;
     }
 
-    if (game.coins < selectedTower.cost) {
+    if (game.status !== 'playing') {
+      showNotice('Màn đã kết thúc, không thể xây thêm.');
+      return;
+    }
+
+    if (game.coins < selectedBuildItem.cost) {
       showNotice('Không đủ vàng!');
       return;
     }
 
     const rect = event.currentTarget.getBoundingClientRect();
-
     const x = ((event.clientX - rect.left) / rect.width) * 100;
     const y = ((event.clientY - rect.top) / rect.height) * 100;
 
     if (x < 1 || x > 99 || y < 1 || y > 99) {
-      showNotice('Không thể đặt tháp sát mép bản đồ!');
+      showNotice('Không thể đặt sát mép bản đồ!');
       return;
     }
 
     const terrain = getTerrainAtPercent(x, y);
+
+    if (selectedBuildItem.type === ROAD_BLOCKER_ITEM.type) {
+      if (terrain !== 'R') {
+        showNotice('Vật chặn chỉ đặt được trên đường!');
+        return;
+      }
+
+      const { row, col } = percentToGrid(x, y);
+      const footprintCells = getBlockerFootprintCells({ row, col });
+      const footprintKeys = new Set(
+        footprintCells.map((cell) => {
+          return `${cell.row},${cell.col}`;
+        })
+      );
+      const blockerExists = game.placedBlockers.some((blocker) => {
+        return getBlockerFootprintCells(blocker).some((cell) =>
+          footprintKeys.has(`${cell.row},${cell.col}`)
+        );
+      });
+
+      if (blockerExists) {
+        showNotice('Vùng đường này đã có vật chặn!');
+        return;
+      }
+
+      const enemyOnCell = game.enemies.some((enemy) => {
+        if (enemy.spawnDelay > 0) return false;
+
+        const enemyCell = percentToGrid(enemy.x, enemy.y);
+
+        return footprintKeys.has(`${enemyCell.row},${enemyCell.col}`);
+      });
+
+      if (enemyOnCell) {
+        showNotice('Không thể đặt vật chặn đè lên quái!');
+        return;
+      }
+
+      const point = gridToPercent(row, col);
+      const newBlocker: PlacedBlocker = {
+        id: Date.now(),
+        type: ROAD_BLOCKER_ITEM.type,
+        x: point.x,
+        y: point.y,
+        row,
+        col,
+        hp: ROAD_BLOCKER_ITEM.maxHp,
+        maxHp: ROAD_BLOCKER_ITEM.maxHp,
+        size: ROAD_BLOCKER_ITEM.size,
+        level: 1,
+        totalInvested: ROAD_BLOCKER_ITEM.cost,
+      };
+
+      setGame((prev) => {
+        if (prev.coins < ROAD_BLOCKER_ITEM.cost) return prev;
+
+        return {
+          ...prev,
+          coins: prev.coins - ROAD_BLOCKER_ITEM.cost,
+          placedBlockers: [...prev.placedBlockers, newBlocker],
+        };
+      });
+
+      showNotice(`Đã đặt ${ROAD_BLOCKER_ITEM.name}!`);
+      setSelectedBuildType(null);
+      setSelectedEntity({ kind: 'blocker', id: newBlocker.id });
+      return;
+    }
+
+    if (!selectedShopTower) return;
 
     if (!isTowerPlaceableAtPercent(x, y)) {
       showNotice(getTerrainMessage(terrain));
@@ -495,38 +297,195 @@ export function GameMap({ onBack }: GameMapProps) {
       return;
     }
 
+    const damageBoost = 1 + upgrades.sharpshooters * 0.08;
     const newTower: PlacedTower = {
       id: Date.now(),
-      type: selectedTower.type,
+      type: selectedShopTower.type,
       x,
       y,
-      size: selectedTower.size,
-      range: selectedTower.range,
-      damage: selectedTower.damage,
-      fireRate: selectedTower.fireRate,
+      size: selectedShopTower.size,
+      range: selectedShopTower.range,
+      damage: Math.round(selectedShopTower.damage * damageBoost),
+      fireRate: selectedShopTower.fireRate,
       lastShotTime: 0,
+      level: 1,
+      totalInvested: selectedShopTower.cost,
     };
 
     setGame((prev) => {
-      if (prev.coins < selectedTower.cost) return prev;
+      if (prev.coins < selectedShopTower.cost) return prev;
 
       return {
         ...prev,
-        coins: prev.coins - selectedTower.cost,
+        coins: prev.coins - selectedShopTower.cost,
         placedTowers: [...prev.placedTowers, newTower],
       };
     });
 
-    showNotice(`Đã đặt ${selectedTower.name}!`);
-    setSelectedTowerType(null);
+    showNotice(`Đã đặt ${selectedShopTower.name}!`);
+    setSelectedBuildType(null);
+    setSelectedEntity({ kind: 'tower', id: newTower.id });
+  };
+
+  const selectBuildItem = (item: BuildShopItem) => {
+    if (game.coins < item.cost) {
+      showNotice('Không đủ vàng!');
+      return;
+    }
+
+    setSelectedEntity(null);
+    setSelectedBuildType(item.type);
+    showNotice(`Đã chọn ${item.name}`);
+  };
+
+  const selectTower = (towerId: number) => {
+    setSelectedBuildType(null);
+    setSelectedEntity({ kind: 'tower', id: towerId });
+  };
+
+  const selectBlocker = (blockerId: number) => {
+    setSelectedBuildType(null);
+    setSelectedEntity({ kind: 'blocker', id: blockerId });
+  };
+
+  const upgradeSelectedTower = () => {
+    if (!selectedTower) return;
+
+    if (selectedTower.level >= MAX_TOWER_LEVEL) {
+      showNotice('Tháp đã đạt cấp tối đa.');
+      return;
+    }
+
+    const cost = getTowerUpgradeCost(selectedTower);
+
+    if (game.coins < cost) {
+      showNotice('Không đủ vàng để nâng cấp tháp!');
+      return;
+    }
+
+    setGame((prev) => ({
+      ...prev,
+      coins: prev.coins - cost,
+      placedTowers: prev.placedTowers.map((tower) => {
+        if (tower.id !== selectedTower.id) return tower;
+
+        return {
+          ...tower,
+          level: tower.level + 1,
+          damage: Math.round(tower.damage * 1.34 + tower.level * 2),
+          range: Number((tower.range + 1.8).toFixed(1)),
+          fireRate: Number((tower.fireRate * 1.14).toFixed(2)),
+          size: tower.size + 3,
+          totalInvested: tower.totalInvested + cost,
+        };
+      }),
+    }));
+    showNotice('Tháp đã được nâng cấp.');
+  };
+
+  const sellSelectedTower = () => {
+    if (!selectedTower) return;
+
+    const refund = Math.floor(selectedTower.totalInvested * 0.65);
+
+    setGame((prev) => ({
+      ...prev,
+      coins: prev.coins + refund,
+      placedTowers: prev.placedTowers.filter((tower) => tower.id !== selectedTower.id),
+    }));
+    setSelectedEntity(null);
+    showNotice(`Đã bán tháp, hoàn ${refund} vàng.`);
+  };
+
+  const upgradeSelectedBlocker = () => {
+    if (!selectedBlocker) return;
+
+    if (selectedBlocker.level >= MAX_BLOCKER_LEVEL) {
+      showNotice('Vật chặn đã đạt cấp tối đa.');
+      return;
+    }
+
+    const cost = getBlockerUpgradeCost(selectedBlocker);
+
+    if (game.coins < cost) {
+      showNotice('Không đủ vàng để gia cố vật chặn!');
+      return;
+    }
+
+    setGame((prev) => ({
+      ...prev,
+      coins: prev.coins - cost,
+      placedBlockers: prev.placedBlockers.map((blocker) => {
+        if (blocker.id !== selectedBlocker.id) return blocker;
+
+        const nextMaxHp = Math.round(blocker.maxHp * 1.45);
+
+        return {
+          ...blocker,
+          level: blocker.level + 1,
+          maxHp: nextMaxHp,
+          hp: Math.min(nextMaxHp, blocker.hp + Math.round(nextMaxHp * 0.45)),
+          size: blocker.size + 4,
+          totalInvested: blocker.totalInvested + cost,
+        };
+      }),
+    }));
+    showNotice('Vật chặn đã được gia cố.');
+  };
+
+  const repairSelectedBlocker = () => {
+    if (!selectedBlocker) return;
+
+    const cost = getBlockerRepairCost(selectedBlocker);
+
+    if (cost <= 0) {
+      showNotice('Vật chặn đang đầy máu.');
+      return;
+    }
+
+    if (game.coins < cost) {
+      showNotice('Không đủ vàng để sửa vật chặn!');
+      return;
+    }
+
+    setGame((prev) => ({
+      ...prev,
+      coins: prev.coins - cost,
+      placedBlockers: prev.placedBlockers.map((blocker) => {
+        if (blocker.id !== selectedBlocker.id) return blocker;
+
+        return {
+          ...blocker,
+          hp: blocker.maxHp,
+        };
+      }),
+    }));
+    showNotice('Vật chặn đã được sửa.');
+  };
+
+  const sellSelectedBlocker = () => {
+    if (!selectedBlocker) return;
+
+    const refund = Math.floor(selectedBlocker.totalInvested * 0.5);
+
+    setGame((prev) => ({
+      ...prev,
+      coins: prev.coins + refund,
+      placedBlockers: prev.placedBlockers.filter((blocker) => blocker.id !== selectedBlocker.id),
+    }));
+    setSelectedEntity(null);
+    showNotice(`Đã bán vật chặn, hoàn ${refund} vàng.`);
   };
 
   const resetGame = () => {
-    setGame(createInitialGameState());
+    setGame(createInitialGameState(level, upgrades));
     setIsPaused(false);
-    setSelectedTowerType(null);
+    setSelectedBuildType(null);
+    setSelectedEntity(null);
     setNotice(null);
     lastTimeRef.current = null;
+    simulatedTimeRef.current = 0;
+    reportedLevelCompleteRef.current = false;
   };
 
   useEffect(() => {
@@ -541,117 +500,9 @@ export function GameMap({ onBack }: GameMapProps) {
       lastTimeRef.current = time;
 
       if (!isPaused) {
-        setGame((prev) => {
-          const activeProjectiles = prev.projectiles.filter(
-            (projectile) => time - projectile.createdAt < PROJECTILE_LIFETIME
-          );
-
-          if (prev.health <= 0 || prev.enemies.length === 0) {
-            if (activeProjectiles.length === prev.projectiles.length) {
-              return prev;
-            }
-
-            return {
-              ...prev,
-              projectiles: activeProjectiles,
-            };
-          }
-
-          let escapedCount = 0;
-          let earnedCoins = 0;
-          let nextEnemies: GameEnemy[] = [];
-          let nextProjectiles: ProjectileEffect[] = [...activeProjectiles];
-
-          for (const enemy of prev.enemies) {
-            const movedEnemy = moveEnemy(enemy, deltaSeconds);
-
-            if (!movedEnemy) {
-              escapedCount += 1;
-              continue;
-            }
-
-            nextEnemies.push(movedEnemy);
-          }
-
-          let nextTowers = prev.placedTowers;
-
-          for (const tower of prev.placedTowers) {
-            const shootDelay = 1000 / tower.fireRate;
-
-            if (time - tower.lastShotTime < shootDelay) continue;
-
-            const possibleTargets = nextEnemies.filter((enemy) => {
-              if (enemy.spawnDelay > 0 || enemy.hp <= 0) return false;
-
-              return distance({ x: tower.x, y: tower.y }, { x: enemy.x, y: enemy.y }) <= tower.range;
-            });
-
-            if (possibleTargets.length === 0) continue;
-
-            const target = possibleTargets.reduce((best, current) => {
-              if (current.pathIndex > best.pathIndex) return current;
-              if (current.pathIndex < best.pathIndex) return best;
-
-              const currentDist = distance(
-                { x: tower.x, y: tower.y },
-                { x: current.x, y: current.y }
-              );
-
-              const bestDist = distance(
-                { x: tower.x, y: tower.y },
-                { x: best.x, y: best.y }
-              );
-
-              return currentDist < bestDist ? current : best;
-            });
-
-            nextTowers = nextTowers.map((item) => {
-              if (item.id !== tower.id) return item;
-
-              return {
-                ...item,
-                lastShotTime: time,
-              };
-            });
-
-            nextProjectiles.push({
-              id: Date.now() + Math.random(),
-              fromX: tower.x,
-              fromY: tower.y,
-              toX: target.x,
-              toY: target.y,
-              type: tower.type,
-              createdAt: time,
-            });
-
-            nextEnemies = nextEnemies.map((enemy) => {
-              if (enemy.id !== target.id) return enemy;
-
-              return {
-                ...enemy,
-                hp: enemy.hp - tower.damage,
-              };
-            });
-          }
-
-          const aliveEnemies = nextEnemies.filter((enemy) => {
-            if (enemy.hp <= 0) {
-              earnedCoins += enemy.reward;
-              return false;
-            }
-
-            return true;
-          });
-
-          return {
-            ...prev,
-            health: Math.max(0, prev.health - escapedCount),
-            coins: prev.coins + earnedCoins,
-            enemies: aliveEnemies,
-            placedTowers: nextTowers,
-            projectiles: nextProjectiles,
-          };
-        });
+        const scaledDeltaSeconds = deltaSeconds * settings.gameSpeed;
+        simulatedTimeRef.current += scaledDeltaSeconds * 1000;
+        setGame((prev) => updateGame(prev, simulatedTimeRef.current, scaledDeltaSeconds));
       }
 
       animationId = requestAnimationFrame(gameLoop);
@@ -660,7 +511,36 @@ export function GameMap({ onBack }: GameMapProps) {
     animationId = requestAnimationFrame(gameLoop);
 
     return () => cancelAnimationFrame(animationId);
-  }, [isPaused]);
+  }, [isPaused, settings.gameSpeed]);
+
+  useEffect(() => {
+    if (!selectedEntity) return;
+
+    if (
+      selectedEntity.kind === 'tower' &&
+      !game.placedTowers.some((tower) => tower.id === selectedEntity.id)
+    ) {
+      setSelectedEntity(null);
+    }
+
+    if (
+      selectedEntity.kind === 'blocker' &&
+      !game.placedBlockers.some((blocker) => blocker.id === selectedEntity.id)
+    ) {
+      setSelectedEntity(null);
+    }
+  }, [game.placedBlockers, game.placedTowers, selectedEntity]);
+
+  useEffect(() => {
+    if (game.status !== 'victory' || reportedLevelCompleteRef.current) return;
+
+    reportedLevelCompleteRef.current = true;
+    onLevelComplete({
+      levelId: game.levelId,
+      score: game.score,
+      stars: game.victoryStars,
+    });
+  }, [game.levelId, game.score, game.status, game.victoryStars, onLevelComplete]);
 
   useEffect(() => {
     return () => {
@@ -672,308 +552,61 @@ export function GameMap({ onBack }: GameMapProps) {
 
   return (
     <div className="size-full relative bg-gradient-to-b from-slate-800 to-slate-900 overflow-hidden">
-      <style>
-        {`
-          @keyframes projectileFade {
-            0% {
-              opacity: 1;
-              filter: drop-shadow(0 0 8px currentColor);
-            }
+      <GameMapStyles reducedEffects={settings.reducedEffects} />
 
-            100% {
-              opacity: 0;
-              filter: drop-shadow(0 0 0px currentColor);
-            }
-          }
-
-          @keyframes hitFlash {
-            0% {
-              opacity: 0.95;
-              transform: scale(0.5);
-            }
-
-            100% {
-              opacity: 0;
-              transform: scale(1.8);
-            }
-          }
-        `}
-      </style>
-
-      <div className="absolute top-0 left-0 right-0 bg-gradient-to-b from-slate-900/95 to-slate-900/80 backdrop-blur-sm border-b-2 border-amber-500/50 z-20">
-        <div className="flex items-center justify-between px-4 py-3">
-          <button
-            onClick={onBack}
-            className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors shadow-lg"
-          >
-            <ArrowLeft className="w-5 h-5" />
-            <span className="font-bold">Menu</span>
-          </button>
-
-          <div className="flex gap-6">
-            <div className="flex items-center gap-2 bg-red-500/20 border-2 border-red-500 px-4 py-2 rounded-lg">
-              <Heart className="w-6 h-6 text-red-500 fill-red-500" />
-              <span className="text-white font-bold text-xl">{game.health}</span>
-            </div>
-
-            <div className="flex items-center gap-2 bg-yellow-500/20 border-2 border-yellow-500 px-4 py-2 rounded-lg">
-              <Coins className="w-6 h-6 text-yellow-500 fill-yellow-500" />
-              <span className="text-white font-bold text-xl">{game.coins}</span>
-            </div>
-
-            <div className="flex items-center gap-2 bg-purple-500/20 border-2 border-purple-500 px-4 py-2 rounded-lg">
-              <Shield className="w-6 h-6 text-purple-500" />
-              <span className="text-white font-bold text-xl">Wave {game.wave}</span>
-            </div>
-          </div>
-
-          <button
-            onClick={() => setIsPaused(!isPaused)}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors shadow-lg"
-          >
-            {isPaused ? <Play className="w-5 h-5" /> : <Pause className="w-5 h-5" />}
-            <span className="font-bold">{isPaused ? 'Tiếp tục' : 'Tạm dừng'}</span>
-          </button>
-        </div>
-      </div>
+      <GameHud
+        coins={game.coins}
+        completedWaves={game.completedWaves}
+        health={game.health}
+        isPaused={isPaused}
+        levelName={game.levelName}
+        maxWaves={game.maxWaves}
+        onBack={onBack}
+        onTogglePause={() => setIsPaused((prev) => !prev)}
+        status={game.status}
+      />
 
       <div className="absolute inset-0 flex pt-20">
-        <div className="flex-1 flex items-center justify-center p-2">
-          <div
-            onClick={placeTower}
-            className={`relative w-full h-full bg-black rounded-xl overflow-hidden shadow-2xl border-4 ${
-              selectedTowerType ? 'border-green-400 cursor-crosshair' : 'border-amber-600'
-            }`}
-          >
-            <img
-              src={mapImage}
-              alt="Game Map"
-              className="absolute inset-0 w-full h-full object-fill z-0"
-            />
+        <GameBoard
+          game={game}
+          gameSpeed={settings.gameSpeed}
+          isPaused={isPaused}
+          notice={notice}
+          onBack={onBack}
+          onPlaceBuildItem={placeBuildItem}
+          onResetGame={resetGame}
+          onSelectBlocker={selectBlocker}
+          onSelectTower={selectTower}
+          reducedEffects={settings.reducedEffects}
+          selectedBlockerId={selectedEntity?.kind === 'blocker' ? selectedEntity.id : null}
+          selectedBuildItem={selectedBuildItem}
+          selectedBuildType={selectedBuildType}
+          selectedTowerId={selectedEntity?.kind === 'tower' ? selectedEntity.id : null}
+          showRanges={settings.showRanges}
+        />
 
-            {notice && (
-              <div className="absolute left-1/2 top-4 -translate-x-1/2 bg-slate-900/90 border-2 border-amber-400 text-white px-5 py-3 rounded-xl font-bold z-40 shadow-xl">
-                {notice}
-              </div>
-            )}
-
-            {selectedTower && (
-              <div className="absolute left-1/2 top-4 -translate-x-1/2 bg-green-600/90 text-white px-4 py-2 rounded-lg font-bold z-40 shadow-lg">
-                Đang chọn {selectedTower.name} - click vào bãi cỏ để đặt
-              </div>
-            )}
-
-            <div className="absolute inset-0 pointer-events-none z-10">
-              {game.placedTowers.map((tower) => (
-                <div
-                  key={`range-${tower.id}`}
-                  className="absolute rounded-full border border-yellow-300/15 bg-yellow-300/5"
-                  style={{
-                    left: `${tower.x - tower.range}%`,
-                    top: `${tower.y - tower.range}%`,
-                    width: `${tower.range * 2}%`,
-                    height: `${tower.range * 2}%`,
-                  }}
-                />
-              ))}
-            </div>
-
-            <div className="absolute inset-0 pointer-events-none z-20">
-              {game.placedTowers.map((tower) => (
-                <div
-                  key={tower.id}
-                  className="absolute"
-                  style={{
-                    left: `${tower.x}%`,
-                    top: `${tower.y}%`,
-                    transform: 'translate(-50%, -50%)',
-                  }}
-                >
-                  <TowerSprite type={tower.type} size={tower.size} />
-                </div>
-              ))}
-            </div>
-
-            <svg
-              className="absolute inset-0 pointer-events-none w-full h-full"
-              style={{ zIndex: 25 }}
-            >
-              {game.projectiles.map((projectile) => {
-                const color = getProjectileColor(projectile.type);
-
-                return (
-                  <g
-                    key={projectile.id}
-                    style={{
-                      color,
-                      animation: isPaused ? 'none' : 'projectileFade 360ms ease-out forwards',
-                    }}
-                  >
-                    <line
-                      x1={`${projectile.fromX}%`}
-                      y1={`${projectile.fromY}%`}
-                      x2={`${projectile.toX}%`}
-                      y2={`${projectile.toY}%`}
-                      stroke={color}
-                      strokeWidth={projectile.type === 'magic' ? 5 : 3}
-                      strokeLinecap="round"
-                      opacity="0.95"
-                    />
-
-                    <circle
-                      cx={`${projectile.toX}%`}
-                      cy={`${projectile.toY}%`}
-                      r={projectile.type === 'magic' ? 9 : 6}
-                      fill={color}
-                      opacity="0.75"
-                      style={{
-                        transformBox: 'fill-box',
-                        transformOrigin: 'center',
-                        animation: isPaused ? 'none' : 'hitFlash 360ms ease-out forwards',
-                      }}
-                    />
-                  </g>
-                );
-              })}
-            </svg>
-
-            <div className="absolute inset-0 pointer-events-none z-30">
-              {game.enemies
-                .filter((enemy) => enemy.spawnDelay <= 0)
-                .map((enemy) => (
-                  <div
-                    key={enemy.id}
-                    className="absolute"
-                    style={{
-                      left: `${enemy.x}%`,
-                      top: `${enemy.y}%`,
-                      transform: 'translate3d(-50%, -50%, 0)',
-                      willChange: 'left, top, transform',
-                    }}
-                  >
-                    <EnemySprite
-                      size={enemy.size}
-                      animation="walkSide"
-                      paused={isPaused}
-                      speed={70}
-                    />
-
-                    <div className="absolute left-1/2 -top-2 w-16 h-2 bg-black/70 rounded-full overflow-hidden border border-white/30 -translate-x-1/2">
-                      <div
-                        className="h-full bg-red-500"
-                        style={{
-                          width: `${Math.max(0, (enemy.hp / enemy.maxHp) * 100)}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                ))}
-            </div>
-
-            {isPaused && game.health > 0 && (
-              <div className="absolute inset-0 bg-black/70 flex items-center justify-center z-50">
-                <div className="text-center">
-                  <h2 className="text-6xl font-black text-white mb-4">TẠM DỪNG</h2>
-                  <p className="text-2xl text-gray-300">Nhấn Tiếp tục để chơi</p>
-                </div>
-              </div>
-            )}
-
-            {game.health <= 0 && (
-              <div className="absolute inset-0 bg-black/80 flex items-center justify-center z-50">
-                <div className="text-center">
-                  <h2 className="text-6xl font-black text-red-500 mb-4">GAME OVER</h2>
-                  <p className="text-2xl text-gray-300 mb-6">
-                    Quái đã vượt qua phòng thủ!
-                  </p>
-
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      resetGame();
-                    }}
-                    className="bg-red-600 hover:bg-red-700 text-white px-8 py-4 rounded-xl font-bold text-xl border-2 border-red-400"
-                  >
-                    Chơi lại
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="w-80 bg-gradient-to-b from-slate-800 to-slate-900 border-l-2 border-amber-500/50 p-4 overflow-y-auto">
-          <h3 className="text-2xl font-bold text-amber-400 mb-4 text-center border-b-2 border-amber-500 pb-2">
-            Chọn Tháp
-          </h3>
-
-          <div className="space-y-3">
-            {TOWER_SHOP.map((tower) => (
-              <button
-                key={tower.type}
-                onClick={() => {
-                  if (game.coins < tower.cost) {
-                    showNotice('Không đủ vàng!');
-                    return;
-                  }
-
-                  setSelectedTowerType(tower.type);
-                  showNotice(`Đã chọn ${tower.name}`);
-                }}
-                className={`w-full bg-gradient-to-r border-2 rounded-xl p-4 transition-all duration-300 transform hover:scale-105 ${
-                  selectedTowerType === tower.type
-                    ? 'from-green-700 to-green-800 border-green-300'
-                    : 'from-slate-700 to-slate-800 hover:from-amber-600 hover:to-amber-700 border-amber-500/50 hover:border-amber-400'
-                } ${game.coins < tower.cost ? 'opacity-50 cursor-not-allowed' : ''}`}
-                disabled={game.health <= 0}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <span className="text-4xl">{tower.icon}</span>
-
-                    <div className="text-left">
-                      <p className="text-white font-bold text-lg">{tower.name}</p>
-
-                      <div className="flex items-center gap-1 text-yellow-400">
-                        <Coins className="w-4 h-4" />
-                        <span className="font-semibold">{tower.cost}</span>
-                      </div>
-
-                      <p className="text-xs text-gray-300 mt-1">
-                        DMG {tower.damage} | Range {tower.range}
-                      </p>
-                    </div>
-                  </div>
-
-                  {game.coins >= tower.cost && (
-                    <div className="bg-green-500 text-white px-3 py-1 rounded-lg text-sm font-bold">
-                      {selectedTowerType === tower.type ? 'Đang chọn' : 'Chọn'}
-                    </div>
-                  )}
-                </div>
-              </button>
-            ))}
-          </div>
-
-          <button
-            onClick={startWave}
-            disabled={game.enemies.length > 0 || game.health <= 0}
-            className={`w-full mt-6 text-white px-6 py-4 rounded-xl font-bold text-xl shadow-xl transition-all duration-300 transform border-2 ${
-              game.enemies.length > 0 || game.health <= 0
-                ? 'bg-gray-600 border-gray-500 cursor-not-allowed opacity-60'
-                : 'bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 hover:scale-105 border-red-400'
-            }`}
-          >
-            {game.enemies.length > 0 ? 'Wave đang chạy' : `Bắt đầu Wave ${game.wave}`}
-          </button>
-
-          <button
-            onClick={resetGame}
-            className="w-full mt-3 bg-slate-700 hover:bg-slate-600 text-white px-6 py-3 rounded-xl font-bold border-2 border-slate-500"
-          >
-            Chơi lại
-          </button>
-        </div>
+        <TowerShopPanel
+          blocker={ROAD_BLOCKER_ITEM}
+          coins={game.coins}
+          enemyCount={game.enemies.length}
+          health={game.health}
+          maxWaves={game.maxWaves}
+          onClearSelection={() => setSelectedEntity(null)}
+          onRepairBlocker={repairSelectedBlocker}
+          onResetGame={resetGame}
+          onSelectItem={selectBuildItem}
+          onSellBlocker={sellSelectedBlocker}
+          onSellTower={sellSelectedTower}
+          onStartWave={startWave}
+          onUpgradeBlocker={upgradeSelectedBlocker}
+          onUpgradeTower={upgradeSelectedTower}
+          selectedBlocker={selectedBlocker}
+          selectedBuildType={selectedBuildType}
+          selectedTower={selectedTower}
+          status={game.status}
+          towers={TOWER_SHOP}
+          wave={game.wave}
+        />
       </div>
     </div>
   );

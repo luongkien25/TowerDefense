@@ -10,6 +10,9 @@ interface EnemySpriteProps {
   speed?: number;
 }
 
+const ENEMY_FRAME_WIDTH = 148;
+const ENEMY_FRAME_HEIGHT = 104;
+
 function drawFrame(
   ctx: CanvasRenderingContext2D,
   image: HTMLImageElement,
@@ -21,10 +24,14 @@ function drawFrame(
   const [sx, sy, sw, sh] = frame.textureRect;
   const [cx, cy, cw, ch] = frame.colorRect;
   const [sourceW, sourceH] = frame.sourceSize;
+  const stableSourceW = Math.max(sourceW, ENEMY_FRAME_WIDTH);
+  const stableSourceH = Math.max(sourceH, ENEMY_FRAME_HEIGHT);
+  const stableOffsetX = (stableSourceW - sourceW) / 2;
+  const stableOffsetY = stableSourceH - sourceH;
 
   const frameCanvas = document.createElement('canvas');
-  frameCanvas.width = sourceW;
-  frameCanvas.height = sourceH;
+  frameCanvas.width = stableSourceW;
+  frameCanvas.height = stableSourceH;
 
   const frameCtx = frameCanvas.getContext('2d');
   if (!frameCtx) return;
@@ -46,11 +53,11 @@ function drawFrame(
     cutCtx.drawImage(image, sx, sy, sw, sh, 0, 0, cw, ch);
   }
 
-  frameCtx.drawImage(cutCanvas, cx, cy, cw, ch);
+  frameCtx.drawImage(cutCanvas, cx + stableOffsetX, cy + stableOffsetY, cw, ch);
 
-  const scale = size / Math.max(sourceW, sourceH);
-  const drawW = sourceW * scale;
-  const drawH = sourceH * scale;
+  const scale = size / Math.max(stableSourceW, stableSourceH);
+  const drawW = stableSourceW * scale;
+  const drawH = stableSourceH * scale;
   const dx = (size - drawW) / 2;
   const dy = (size - drawH) / 2;
 
@@ -80,6 +87,7 @@ export function EnemySprite({
   const [frameIndex, setFrameIndex] = useState(0);
 
   const frames = ENEMY_ANIMATIONS[animation];
+  const currentFrame = frames[frameIndex % frames.length];
 
   useEffect(() => {
     const img = new Image();
@@ -89,6 +97,10 @@ export function EnemySprite({
       setImageReady(true);
     };
   }, []);
+
+  useEffect(() => {
+    setFrameIndex(0);
+  }, [animation]);
 
   useEffect(() => {
     if (paused) return;
@@ -109,8 +121,8 @@ export function EnemySprite({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    drawFrame(ctx, image, frames[frameIndex], size);
-  }, [frameIndex, imageReady, frames, size]);
+    drawFrame(ctx, image, currentFrame, size);
+  }, [currentFrame, imageReady, size]);
 
   return (
     <canvas
